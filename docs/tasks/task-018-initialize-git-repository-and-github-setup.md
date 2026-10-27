@@ -1,9 +1,9 @@
 # 任务登记：初始化本地 Git 仓库与关联 GitHub 远程仓库 (Agrainbonc)
 
 - 任务ID: TASK-018
-- 状态: IN_PROGRESS
+- 状态: DONE
 - 创建时间: 2026-10-27
-- 完成时间: 未完成
+- 完成时间: 2026-10-27
 - 责任Agent: Antigravity
 
 ## 任务背景与目标
