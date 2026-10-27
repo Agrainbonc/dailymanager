@@ -1,0 +1,2 @@
+"""Daily Manager local backend."""
+
