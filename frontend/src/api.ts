@@ -22,6 +22,8 @@ import type {
   StorageAudit,
   StrategyBoard,
   StrategyItem,
+  SyncCoursesPayload,
+  SyncCoursesResult,
   SystemSettings,
   TimetableApplyResult,
   TimetableCandidateItem,
@@ -192,6 +194,9 @@ export const api = {
   getStrategyBoard: () => request<StrategyBoard>('/api/calendar/strategy'),
   saveStrategyBoard: (items: StrategyItem[]) =>
     request<StrategyBoard>('/api/calendar/strategy', { method: 'PUT', body: JSON.stringify({ items }) }),
+  syncCoursesToCalendar: (payload: SyncCoursesPayload) =>
+    request<SyncCoursesResult>('/api/calendar/sync-courses', { method: 'POST', body: JSON.stringify(payload) }),
+
 
   // --- 任务规划工作流 (有绪) ---
   workflows: () => request<WorkflowProject[]>('/api/workflows'),

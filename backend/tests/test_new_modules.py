@@ -190,6 +190,43 @@ class NewModulesTest(unittest.TestCase):
             self.assertGreaterEqual(clean_res.cleaned_orphans_count, 0)
             self.assertEqual(clean_res.deleted_files_count, clean_res.cleaned_orphans_count)
 
+    def test_sync_courses_to_calendar(self):
+        import json
+        from app.models import Course
+        from app.schemas import SyncCoursesToCalendarRequest
+        from app.services.calendar_service import sync_courses_to_calendar
+
+        with self.SessionLocal() as db:
+            # 1. 准备一门测试课程，每周二 14:00-15:40 排课
+            course = Course(
+                name="高级机器学习",
+                schedule_json=json.dumps([
+                    {"weekday": 2, "start_time": "14:00", "end_time": "15:40"}
+                ]),
+            )
+            db.add(course)
+            db.commit()
+            db.refresh(course)
+
+            # 2. 同步到日历：2026-11-01 (周日) 到 2026-11-15 (周日) 共两周 (含 11-03、11-10 两个周二)
+            req = SyncCoursesToCalendarRequest(
+                start_date="2026-11-01",
+                end_date="2026-11-15",
+                course_ids=[course.id],
+                sync_to_events=True,
+                sync_to_tray=True,
+                sync_to_strategy=True,
+            )
+            res = sync_courses_to_calendar(req, db)
+            self.assertEqual(res.created_events_count, 2)
+            self.assertEqual(res.created_tray_count, 1)
+            self.assertEqual(res.created_strategy_count, 1)
+            self.assertIn("高级机器学习", res.affected_course_names)
+
+            # 3. 再次重复同步同一区间，事件防重计数应为 0
+            res2 = sync_courses_to_calendar(req, db)
+            self.assertEqual(res2.created_events_count, 0)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -3,18 +3,21 @@ from __future__ import annotations
 import json
 import logging
 import uuid
+from datetime import date, timedelta
 from typing import Any
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.models import CalendarWorkspace, StrategyBoard
+from app.models import CalendarWorkspace, Course, StrategyBoard
 from app.schemas import (
     CalendarWorkspaceCreate,
     CalendarWorkspaceRead,
     CalendarWorkspaceUpdate,
     StrategyBoardRead,
     StrategyBoardUpdate,
+    SyncCoursesToCalendarRequest,
+    SyncCoursesToCalendarResponse,
 )
 
 logger = logging.getLogger(__name__)
@@ -179,3 +182,143 @@ def update_strategy_board(payload: StrategyBoardUpdate, db: Session) -> Strategy
     db.commit()
     db.refresh(board)
     return StrategyBoardRead(id="default", items=payload.items, updated_at=board.updated_at)
+
+
+def sync_courses_to_calendar(
+    payload: SyncCoursesToCalendarRequest, db: Session
+) -> SyncCoursesToCalendarResponse:
+    """将课程表自动同步导入到日历日程（events）、待安排托盘（tray）或博弈论看板（strategy）。"""
+    _ensure_default_calendar(db)
+    _ensure_default_strategy(db)
+
+    # 1. 确定目标日历工作区
+    if payload.workspace_id:
+        workspace = db.scalar(select(CalendarWorkspace).where(CalendarWorkspace.id == payload.workspace_id))
+    else:
+        workspace = db.scalar(select(CalendarWorkspace).where(CalendarWorkspace.is_active.is_(True)))
+        if not workspace:
+            workspace = db.scalar(select(CalendarWorkspace).order_by(CalendarWorkspace.created_at.asc()))
+
+    if not workspace:
+        raise ValueError("未找到可用的日历工作区")
+
+    try:
+        cal_data = json.loads(workspace.data_json) if workspace.data_json else {}
+    except Exception:
+        cal_data = {}
+
+    for key in ("tray", "events", "marks", "global", "monthly"):
+        if key not in cal_data or not isinstance(cal_data[key], list):
+            cal_data[key] = []
+
+    # 2. 获取待同步课程
+    query = select(Course)
+    if payload.course_ids:
+        query = query.where(Course.id.in_(payload.course_ids))
+    courses = db.scalars(query.order_by(Course.name.asc())).all()
+
+    # 3. 日期范围解析
+    start_d = date.fromisoformat(payload.start_date)
+    end_d = date.fromisoformat(payload.end_date)
+    if start_d > end_d:
+        raise ValueError("开始日期不能晚于结束日期")
+
+    created_events_count = 0
+    created_tray_count = 0
+    created_strategy_count = 0
+    affected_courses: list[str] = []
+
+    # 4. 同步至日历具体排期日程 (Calendar Events)
+    if payload.sync_to_events:
+        existing_event_keys = {
+            (ev.get("date"), ev.get("title"), ev.get("start"))
+            for ev in cal_data["events"]
+            if isinstance(ev, dict)
+        }
+
+        for course in courses:
+            try:
+                slots = json.loads(course.schedule_json or "[]")
+            except Exception:
+                slots = []
+            if not slots:
+                continue
+
+            if course.name not in affected_courses:
+                affected_courses.append(course.name)
+
+            curr = start_d
+            while curr <= end_d:
+                weekday_num = curr.isoweekday()  # 1=周一, 7=周日
+                for slot in slots:
+                    if slot.get("weekday") == weekday_num:
+                        start_t = slot.get("start_time", "08:00")
+                        end_t = slot.get("end_time")
+                        key = (curr.isoformat(), course.name, start_t)
+                        if key not in existing_event_keys:
+                            event_id = f"ev_{uuid.uuid4().hex[:8]}"
+                            cal_data["events"].append({
+                                "id": event_id,
+                                "date": curr.isoformat(),
+                                "title": course.name,
+                                "start": start_t,
+                                "end": end_t,
+                                "note": "课程表自动同步",
+                            })
+                            existing_event_keys.add(key)
+                            created_events_count += 1
+                curr += timedelta(days=1)
+
+    # 5. 同步至待安排托盘 (Tray)
+    if payload.sync_to_tray:
+        existing_tray_texts = {t.get("text") for t in cal_data["tray"] if isinstance(t, dict)}
+        for course in courses:
+            if course.name not in affected_courses:
+                affected_courses.append(course.name)
+            tray_text = f"【课程】{course.name}"
+            if tray_text not in existing_tray_texts:
+                cal_data["tray"].append({
+                    "id": f"tray_{uuid.uuid4().hex[:8]}",
+                    "text": tray_text,
+                })
+                existing_tray_texts.add(tray_text)
+                created_tray_count += 1
+
+    # 保存日历工作区
+    workspace.data_json = json.dumps(cal_data, ensure_ascii=False)
+
+    # 6. 同步至博弈论看板 (StrategyBoard)
+    if payload.sync_to_strategy:
+        board = db.scalar(select(StrategyBoard).where(StrategyBoard.id == "default"))
+        try:
+            strategy_items = json.loads(board.data_json) if board and board.data_json else []
+        except Exception:
+            strategy_items = []
+        existing_strategy_texts = {s.get("text") for s in strategy_items if isinstance(s, dict)}
+
+        for course in courses:
+            if course.name not in affected_courses:
+                affected_courses.append(course.name)
+            strat_text = f"复习与巩固：{course.name}"
+            if strat_text not in existing_strategy_texts:
+                strategy_items.append({
+                    "id": f"strat_{uuid.uuid4().hex[:8]}",
+                    "text": strat_text,
+                    "zone": "inbox",
+                })
+                existing_strategy_texts.add(strat_text)
+                created_strategy_count += 1
+
+        if board:
+            board.data_json = json.dumps(strategy_items, ensure_ascii=False)
+
+    db.commit()
+
+    return SyncCoursesToCalendarResponse(
+        created_events_count=created_events_count,
+        created_tray_count=created_tray_count,
+        created_strategy_count=created_strategy_count,
+        target_workspace_name=workspace.name,
+        affected_course_names=affected_courses,
+    )
+

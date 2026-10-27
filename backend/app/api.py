@@ -43,6 +43,8 @@ from app.schemas import (
     StorageAuditRead,
     StrategyBoardRead,
     StrategyBoardUpdate,
+    SyncCoursesToCalendarRequest,
+    SyncCoursesToCalendarResponse,
     SystemSettingsRead,
     SystemSettingsUpdate,
     WorkflowProjectCreate,
@@ -54,6 +56,7 @@ from app.services.calendar_service import (
     delete_calendar_workspace,
     get_strategy_board,
     list_calendar_workspaces,
+    sync_courses_to_calendar,
     update_calendar_workspace,
     update_strategy_board,
 )
@@ -785,6 +788,17 @@ def update_strategy_board_api(
     payload: StrategyBoardUpdate, session: Session = Depends(get_session)
 ) -> StrategyBoardRead:
     return update_strategy_board(payload, session)
+
+
+@router.post("/calendar/sync-courses", response_model=SyncCoursesToCalendarResponse)
+def sync_courses_to_calendar_api(
+    payload: SyncCoursesToCalendarRequest, session: Session = Depends(get_session)
+) -> SyncCoursesToCalendarResponse:
+    try:
+        return sync_courses_to_calendar(payload, session)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
 
 
 # --- 任务规划工作流 (有绪) 路由 ---

@@ -279,6 +279,25 @@ export interface StrategyBoard {
   updated_at?: string | null
 }
 
+export interface SyncCoursesPayload {
+  workspace_id?: string | null
+  start_date: string
+  end_date: string
+  course_ids?: number[]
+  sync_to_events?: boolean
+  sync_to_tray?: boolean
+  sync_to_strategy?: boolean
+}
+
+export interface SyncCoursesResult {
+  created_events_count: number
+  created_tray_count: number
+  created_strategy_count: number
+  target_workspace_name: string
+  affected_course_names: string[]
+}
+
+
 // --- 任务规划工作流 (有绪) ---
 
 export type NodeStatus = 'todo' | 'doing' | 'done'

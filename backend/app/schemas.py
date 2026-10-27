@@ -269,6 +269,25 @@ class StrategyBoardUpdate(BaseModel):
     items: list[dict]
 
 
+class SyncCoursesToCalendarRequest(BaseModel):
+    workspace_id: str | None = None
+    start_date: str = Field(pattern=r"^\d{4}-\d{2}-\d{2}$", description="开始日期 YYYY-MM-DD")
+    end_date: str = Field(pattern=r"^\d{4}-\d{2}-\d{2}$", description="结束日期 YYYY-MM-DD")
+    course_ids: list[int] = Field(default_factory=list, description="要同步的课程ID列表，空表示全部课程")
+    sync_to_events: bool = Field(default=True, description="是否同步生成具体的日历事件")
+    sync_to_tray: bool = Field(default=False, description="是否同步到待安排托盘")
+    sync_to_strategy: bool = Field(default=False, description="是否同步到博弈论看板收集箱")
+
+
+class SyncCoursesToCalendarResponse(BaseModel):
+    created_events_count: int
+    created_tray_count: int
+    created_strategy_count: int
+    target_workspace_name: str
+    affected_course_names: list[str]
+
+
+
 # --- 任务规划工作流 (有绪) Schema ---
 
 class WorkflowProjectRead(BaseModel):

@@ -1,12 +1,17 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
 import {
+  ArrowRightLeft,
+  BookOpenText,
   Calendar,
+  CheckCircle2,
   ChevronLeft,
   ChevronRight,
   GripVertical,
   Plus,
+  RefreshCw,
   Settings2,
+  Sparkles,
   Trash2,
   X,
 } from '@lucide/vue'
@@ -16,6 +21,7 @@ import type {
   CalendarMarkItem,
   CalendarTaskCard,
   CalendarWorkspace,
+  Course,
   StrategyBoard,
   StrategyItem,
   StrategyZone,
@@ -77,6 +83,80 @@ const eventTitleInput = ref('')
 const eventStartInput = ref('')
 const eventEndInput = ref('')
 const eventNoteInput = ref('')
+
+// 课程表同步弹窗状态
+const syncModalOpen = ref(false)
+const syncingCourses = ref(false)
+const availableCourses = ref<Course[]>([])
+const syncForm = ref({
+  workspaceId: '',
+  startDate: '',
+  endDate: '',
+  courseIds: [] as number[],
+  syncToEvents: true,
+  syncToTray: false,
+  syncToStrategy: false,
+})
+
+function formatIsoDate(d: Date) {
+  const y = d.getFullYear()
+  const m = String(d.getMonth() + 1).padStart(2, '0')
+  const day = String(d.getDate()).padStart(2, '0')
+  return `${y}-${m}-${day}`
+}
+
+function setSyncQuickWeeks(weeks: number) {
+  const now = new Date()
+  syncForm.value.startDate = formatIsoDate(now)
+  const future = new Date(now.getTime() + weeks * 7 * 24 * 3600 * 1000)
+  syncForm.value.endDate = formatIsoDate(future)
+}
+
+async function openSyncCoursesModal() {
+  syncForm.value.workspaceId = activeWorkspaceId.value || ''
+  setSyncQuickWeeks(8)
+  try {
+    availableCourses.value = await api.courses()
+    // 默认全选课程
+    syncForm.value.courseIds = availableCourses.value.map((c) => c.id)
+  } catch (err) {
+    emit('notify', '获取课程列表失败', true)
+  }
+  syncModalOpen.value = true
+}
+
+async function submitSyncCourses() {
+  if (!syncForm.value.startDate || !syncForm.value.endDate) {
+    emit('notify', '请选择同步起止日期', true)
+    return
+  }
+  if (!syncForm.value.syncToEvents && !syncForm.value.syncToTray && !syncForm.value.syncToStrategy) {
+    emit('notify', '请至少勾选一种同步目标（日历日程 / 待安排托盘 / 博弈论收集箱）', true)
+    return
+  }
+  syncingCourses.value = true
+  try {
+    const res = await api.syncCoursesToCalendar({
+      workspace_id: syncForm.value.workspaceId || null,
+      start_date: syncForm.value.startDate,
+      end_date: syncForm.value.endDate,
+      course_ids: syncForm.value.courseIds,
+      sync_to_events: syncForm.value.syncToEvents,
+      sync_to_tray: syncForm.value.syncToTray,
+      sync_to_strategy: syncForm.value.syncToStrategy,
+    })
+    emit(
+      'notify',
+      `同步成功！为“${res.target_workspace_name}”创建了 ${res.created_events_count} 节日程、${res.created_tray_count} 个托盘待办、${res.created_strategy_count} 个博弈论任务卡片。`
+    )
+    syncModalOpen.value = false
+    await loadAllData()
+  } catch (err) {
+    emit('notify', err instanceof Error ? err.message : '课程同步失败', true)
+  } finally {
+    syncingCourses.value = false
+  }
+}
 
 // 表单输入暂存
 const gameInputText = ref('')
@@ -478,14 +558,20 @@ onMounted(() => {
           </p>
         </div>
 
-        <div v-if="activeView === 'calendar'" class="top-tools">
-          <button class="tool-btn" @click="currentYear = today.getFullYear()">回到今年</button>
-          <button class="tool-btn icon-btn" @click="currentYear--"><ChevronLeft :size="16" /></button>
-          <span class="year-label">{{ currentYear }} 年</span>
-          <button class="tool-btn icon-btn" @click="currentYear++"><ChevronRight :size="16" /></button>
-          <button class="tool-btn edit-btn" @click="openEditCalendarModal">
-            <Settings2 :size="14" /> 日历设置
+        <div class="top-tools">
+          <button class="tool-btn sync-btn" title="将课程表批量同步到日程或博弈论" @click="openSyncCoursesModal">
+            <ArrowRightLeft :size="14" />
+            <span>同步课程表</span>
           </button>
+          <template v-if="activeView === 'calendar'">
+            <button class="tool-btn" @click="currentYear = today.getFullYear()">回到今年</button>
+            <button class="tool-btn icon-btn" @click="currentYear--"><ChevronLeft :size="16" /></button>
+            <span class="year-label">{{ currentYear }} 年</span>
+            <button class="tool-btn icon-btn" @click="currentYear++"><ChevronRight :size="16" /></button>
+            <button class="tool-btn edit-btn" @click="openEditCalendarModal">
+              <Settings2 :size="14" /> 日历设置
+            </button>
+          </template>
         </div>
       </header>
 
@@ -901,6 +987,98 @@ onMounted(() => {
           <button v-if="editingEventId" class="danger-btn" @click="deleteEventModal">删除日程</button>
           <button class="secondary-btn" @click="eventModalOpen = false">取消</button>
           <button class="primary-btn" @click="saveEventModal">保存</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- 同步课程表弹窗 -->
+    <div v-if="syncModalOpen" class="modal-backdrop">
+      <div class="cal-modal sync-courses-modal">
+        <div class="modal-head-row">
+          <div class="modal-title-box">
+            <BookOpenText :size="20" class="text-accent" />
+            <div>
+              <h3>课程表同步导入</h3>
+              <p class="modal-sub">将课程库排课安排（星期/时间）自动批量导入到日程或博弈论看板</p>
+            </div>
+          </div>
+          <button class="close-btn" @click="syncModalOpen = false"><X :size="16" /></button>
+        </div>
+
+        <!-- 目标日历 -->
+        <label class="modal-label">
+          目标日历工作区
+          <select v-model="syncForm.workspaceId">
+            <option v-for="ws in workspaces" :key="ws.id" :value="ws.id">
+              {{ ws.name }}
+            </option>
+          </select>
+        </label>
+
+        <!-- 同步起止日期范围与快捷标签 -->
+        <div class="modal-label">
+          <div class="range-head">
+            <span>同步日期范围</span>
+            <div class="quick-ranges">
+              <button type="button" @click="setSyncQuickWeeks(4)">未来4周</button>
+              <button type="button" @click="setSyncQuickWeeks(8)">未来8周</button>
+              <button type="button" @click="setSyncQuickWeeks(16)">本学期(16周)</button>
+            </div>
+          </div>
+          <div class="time-inputs-row">
+            <input v-model="syncForm.startDate" type="date" />
+            <input v-model="syncForm.endDate" type="date" />
+          </div>
+        </div>
+
+        <!-- 同步目标 -->
+        <div class="modal-label">
+          同步目标选择
+          <div class="sync-targets-box">
+            <label class="checkbox-item">
+              <input v-model="syncForm.syncToEvents" type="checkbox" />
+              <div>
+                <strong>生成具体日历日程（Events）</strong>
+                <small>在所选时间跨度内，按每门课的周几和起止时间自动批量填入日历（自动防重）</small>
+              </div>
+            </label>
+            <label class="checkbox-item">
+              <input v-model="syncForm.syncToTray" type="checkbox" />
+              <div>
+                <strong>同步到日历待安排托盘（Tray）</strong>
+                <small>作为待办事项卡片放入待安排列表，方便随时拖拽排期</small>
+              </div>
+            </label>
+            <label class="checkbox-item">
+              <input v-model="syncForm.syncToStrategy" type="checkbox" />
+              <div>
+                <strong>同步到博弈论看板收集箱（Inbox）</strong>
+                <small>作为课程复习任务放入博弈论事情托盘，进行必须完成/可延期决策</small>
+              </div>
+            </label>
+          </div>
+        </div>
+
+        <!-- 课程选择 -->
+        <div class="modal-label">
+          选择参与同步的课程 ({{ syncForm.courseIds.length }}/{{ availableCourses.length }})
+          <div class="course-pick-box">
+            <label v-for="c in availableCourses" :key="c.id" class="course-pick-item">
+              <input v-model="syncForm.courseIds" type="checkbox" :value="c.id" />
+              <span>{{ c.name }}</span>
+              <small v-if="c.schedule.length">({{ c.schedule.length }}节课/周)</small>
+              <small v-else class="text-muted">(暂未配置时段)</small>
+            </label>
+          </div>
+        </div>
+
+        <div class="modal-actions">
+          <button class="secondary-btn" @click="syncModalOpen = false">取消</button>
+          <button class="primary-btn" :disabled="syncingCourses" @click="submitSyncCourses">
+            <RefreshCw v-if="syncingCourses" class="spin-icon" :size="14" />
+            <ArrowRightLeft v-else :size="14" />
+            {{ syncingCourses ? '正在同步...' : '开始导入' }}
+          </button>
         </div>
       </div>
     </div>
@@ -1656,5 +1834,158 @@ textarea {
   border-radius: 6px;
   font-size: 12px;
   cursor: pointer;
+}
+
+/* 课程表同步相关样式 */
+.sync-btn {
+  background: var(--accentSoft, #eef2ff);
+  color: var(--accent, #627cf7);
+  border-color: rgba(98, 124, 247, 0.3);
+  display: flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.sync-btn:hover {
+  background: var(--accent, #627cf7);
+  color: white;
+}
+
+.sync-courses-modal {
+  max-width: 520px;
+}
+
+.modal-head-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  margin-bottom: 14px;
+}
+
+.modal-title-box {
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+}
+
+.modal-title-box h3 {
+  margin: 0;
+  font-size: 16px;
+}
+
+.close-btn {
+  border: 0;
+  background: transparent;
+  color: #94a3b8;
+  cursor: pointer;
+  padding: 4px;
+}
+
+.range-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 6px;
+}
+
+.quick-ranges {
+  display: flex;
+  gap: 4px;
+}
+
+.quick-ranges button {
+  border: 1px solid #cbd5e1;
+  background: white;
+  border-radius: 4px;
+  font-size: 10px;
+  padding: 2px 6px;
+  color: #64748b;
+  cursor: pointer;
+}
+
+.quick-ranges button:hover {
+  background: #f1f5f9;
+  color: #0f172a;
+}
+
+.sync-targets-box {
+  display: grid;
+  gap: 8px;
+  margin-top: 6px;
+}
+
+.checkbox-item {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 8px 10px;
+  border: 1px solid #e2e8f0;
+  border-radius: 6px;
+  background: #f8fafc;
+  cursor: pointer;
+}
+
+.checkbox-item input {
+  margin-top: 2px;
+}
+
+.checkbox-item strong {
+  display: block;
+  font-size: 12px;
+  color: #1e293b;
+}
+
+.checkbox-item small {
+  display: block;
+  font-size: 10px;
+  color: #64748b;
+  line-height: 1.4;
+}
+
+.course-pick-box {
+  max-height: 140px;
+  overflow-y: auto;
+  border: 1px solid #e2e8f0;
+  border-radius: 6px;
+  padding: 6px;
+  display: grid;
+  gap: 4px;
+  background: #ffffff;
+  margin-top: 6px;
+}
+
+.course-pick-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 6px;
+  border-radius: 4px;
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.course-pick-item:hover {
+  background: #f1f5f9;
+}
+
+.text-accent {
+  color: var(--accent);
+}
+
+.text-muted {
+  color: #94a3b8;
+}
+
+.spin-icon {
+  animation: spin 1s linear infinite;
+}
+
+@keyframes spin {
+  from {
+    transform: rotate(0deg);
+  }
+  to {
+    transform: rotate(360deg);
+  }
 }
 </style>
