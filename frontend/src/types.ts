@@ -230,6 +230,11 @@ export interface CalendarEventItem {
   start: string
   end?: string
   note?: string
+  completed?: boolean
+  category?: string
+  priority?: 'high' | 'medium' | 'low'
+  estimated_minutes?: number
+  source?: string
 }
 
 export interface CalendarMarkItem {

@@ -5,4 +5,6 @@ pydantic>=2.8,<3.0
 watchdog>=5.0,<7.0
 python-pptx>=1.0,<2.0
 python-multipart>=0.0.18
+dashscope>=1.20,<2.0
+imageio-ffmpeg>=0.5,<1.0
 

@@ -4,9 +4,10 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 
 from app.api import router
-from app.config import ensure_data_directories
+from app.config import ensure_data_directories, get_frontend_dist_dir
 from app.database import initialize_database
 from app.services.job_runner import job_runner
 from app.services.watch_service import directory_watch_service
@@ -44,3 +45,9 @@ async def handle_client_disconnect_middleware(request, call_next):
 
 
 app.include_router(router)
+
+# Windows package ships the built Vue application beside the backend.  Mount it
+# last so explicit /api and /docs routes continue to take precedence.
+frontend_dist = get_frontend_dist_dir()
+if frontend_dist.is_dir():
+    app.mount("/", StaticFiles(directory=frontend_dist, html=True), name="frontend")

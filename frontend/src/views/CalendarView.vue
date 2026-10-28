@@ -7,12 +7,15 @@ import {
   CheckCircle2,
   ChevronLeft,
   ChevronRight,
+  Download,
+  FileSpreadsheet,
   GripVertical,
   Plus,
   RefreshCw,
   Settings2,
   Sparkles,
   Trash2,
+  Upload,
   X,
 } from '@lucide/vue'
 import { api } from '../api'
@@ -98,11 +101,278 @@ const syncForm = ref({
   syncToStrategy: false,
 })
 
+// 学习计划文件导入状态
+interface ImportedStudyTask extends CalendarEventItem {
+  rowNumber: number
+}
+
+const importModalOpen = ref(false)
+const importFileInput = ref<HTMLInputElement | null>(null)
+const importFileName = ref('')
+const importedStudyTasks = ref<ImportedStudyTask[]>([])
+const importWarnings = ref<string[]>([])
+const importingPlan = ref(false)
+
 function formatIsoDate(d: Date) {
   const y = d.getFullYear()
   const m = String(d.getMonth() + 1).padStart(2, '0')
   const day = String(d.getDate()).padStart(2, '0')
   return `${y}-${m}-${day}`
+}
+
+function addDays(base: Date, days: number) {
+  const result = new Date(base)
+  result.setDate(result.getDate() + days)
+  return result
+}
+
+function normalizeHeader(value: string) {
+  return value.trim().toLowerCase().replace(/[\s_（）()\-]/g, '')
+}
+
+function findRowValue(row: Record<string, unknown>, aliases: string[]) {
+  const aliasSet = new Set(aliases.map(normalizeHeader))
+  const matched = Object.entries(row).find(([key]) => aliasSet.has(normalizeHeader(key)))
+  return matched?.[1]
+}
+
+function excelSerialToIsoDate(value: number): string | null {
+  if (!Number.isFinite(value) || value <= 0) return null
+  const utc = new Date(Date.UTC(1899, 11, 30) + Math.floor(value) * 24 * 60 * 60 * 1000)
+  if (Number.isNaN(utc.getTime())) return null
+  return `${utc.getUTCFullYear()}-${String(utc.getUTCMonth() + 1).padStart(2, '0')}-${String(utc.getUTCDate()).padStart(2, '0')}`
+}
+
+function normalizePlanDate(value: unknown): string | null {
+  if (value instanceof Date && !Number.isNaN(value.getTime())) return formatIsoDate(value)
+
+  if (typeof value === 'number' && Number.isFinite(value)) {
+    return excelSerialToIsoDate(value)
+  }
+
+  const raw = String(value ?? '').trim()
+  if (!raw) return null
+  if (/^\d{5}(\.\d+)?$/.test(raw)) {
+    return excelSerialToIsoDate(Number(raw))
+  }
+
+  const normalized = raw.replace(/[年/.]/g, '-').replace(/月/g, '-').replace(/日/g, '').replace(/-+/g, '-')
+  const full = normalized.match(/^(\d{4})-(\d{1,2})-(\d{1,2})$/)
+  const short = normalized.match(/^(\d{1,2})-(\d{1,2})$/)
+  const year = full ? Number(full[1]) : currentYear.value
+  const month = Number(full?.[2] ?? short?.[1])
+  const day = Number(full?.[3] ?? short?.[2])
+  if (!month || !day) return null
+  const candidate = new Date(year, month - 1, day)
+  if (candidate.getFullYear() !== year || candidate.getMonth() !== month - 1 || candidate.getDate() !== day) return null
+  return formatIsoDate(candidate)
+}
+
+function normalizePlanTime(value: unknown, fallback = ''): string {
+  if (value instanceof Date && !Number.isNaN(value.getTime())) {
+    return `${String(value.getHours()).padStart(2, '0')}:${String(value.getMinutes()).padStart(2, '0')}`
+  }
+  if (typeof value === 'number' && value >= 0 && value < 1) {
+    const totalMinutes = Math.round(value * 24 * 60)
+    return `${String(Math.floor(totalMinutes / 60) % 24).padStart(2, '0')}:${String(totalMinutes % 60).padStart(2, '0')}`
+  }
+  const raw = String(value ?? '').trim().replace(/时|点/g, ':').replace(/分/g, '')
+  const matched = raw.match(/^(\d{1,2})(?::(\d{1,2}))?$/)
+  if (!matched) return fallback
+  const hour = Math.min(23, Number(matched[1]))
+  const minute = Math.min(59, Number(matched[2] || 0))
+  return `${String(hour).padStart(2, '0')}:${String(minute).padStart(2, '0')}`
+}
+
+function normalizePriority(value: unknown): 'high' | 'medium' | 'low' {
+  const raw = String(value ?? '').trim().toLowerCase()
+  if (['高', '重要', '紧急', 'high', '1'].includes(raw)) return 'high'
+  if (['低', '稍后', 'low', '3'].includes(raw)) return 'low'
+  return 'medium'
+}
+
+function normalizeCompleted(value: unknown) {
+  const raw = String(value ?? '').trim().toLowerCase()
+  return ['是', '已完成', '完成', 'true', 'yes', '1'].includes(raw)
+}
+
+function parseCsvText(text: string): Record<string, unknown>[] {
+  const matrix: string[][] = []
+  let row: string[] = []
+  let field = ''
+  let quoted = false
+  const source = text.replace(/^\uFEFF/, '')
+
+  for (let index = 0; index < source.length; index += 1) {
+    const char = source[index]
+    if (char === '"') {
+      if (quoted && source[index + 1] === '"') {
+        field += '"'
+        index += 1
+      } else {
+        quoted = !quoted
+      }
+    } else if (char === ',' && !quoted) {
+      row.push(field.trim())
+      field = ''
+    } else if ((char === '\n' || char === '\r') && !quoted) {
+      if (char === '\r' && source[index + 1] === '\n') index += 1
+      row.push(field.trim())
+      field = ''
+      if (row.some((cell) => cell.length > 0)) matrix.push(row)
+      row = []
+    } else {
+      field += char
+    }
+  }
+  row.push(field.trim())
+  if (row.some((cell) => cell.length > 0)) matrix.push(row)
+  if (matrix.length < 2) return []
+
+  const headers = matrix[0]
+  return matrix.slice(1).map((cells) =>
+    Object.fromEntries(headers.map((header, index) => [header, cells[index] ?? '']))
+  )
+}
+
+function rowsToStudyTasks(rows: Record<string, unknown>[]) {
+  const tasks: ImportedStudyTask[] = []
+  const warnings: string[] = []
+
+  rows.forEach((row, index) => {
+    const rowNumber = index + 2
+    const date = normalizePlanDate(findRowValue(row, ['日期', '学习日期', 'date', 'day']))
+    const title = String(findRowValue(row, ['任务', '学习任务', '任务名称', '事项', 'title', 'task', 'content']) ?? '').trim()
+    if (!date || !title) {
+      warnings.push(`第 ${rowNumber} 行缺少有效日期或任务名称，已跳过`)
+      return
+    }
+
+    const estimatedRaw = findRowValue(row, ['预计分钟', '预计时长', '时长分钟', 'minutes', 'duration'])
+    const estimated = Number.parseInt(String(estimatedRaw ?? ''), 10)
+    const start = normalizePlanTime(findRowValue(row, ['开始时间', '开始', 'start', 'time']), '09:00')
+    let end = normalizePlanTime(findRowValue(row, ['结束时间', '结束', 'end']))
+    if (!end && Number.isFinite(estimated) && estimated > 0) {
+      const [hour, minute] = start.split(':').map(Number)
+      const endMinutes = hour * 60 + minute + estimated
+      end = `${String(Math.floor(endMinutes / 60) % 24).padStart(2, '0')}:${String(endMinutes % 60).padStart(2, '0')}`
+    }
+
+    tasks.push({
+      id: generateId(),
+      rowNumber,
+      date,
+      title,
+      start,
+      end,
+      note: String(findRowValue(row, ['备注', '说明', 'note', 'description']) ?? '').trim(),
+      category: String(findRowValue(row, ['分类', '科目', '课程', 'category', 'subject']) ?? '').trim(),
+      priority: normalizePriority(findRowValue(row, ['优先级', '重要程度', 'priority'])),
+      estimated_minutes: Number.isFinite(estimated) && estimated > 0 ? estimated : undefined,
+      completed: normalizeCompleted(findRowValue(row, ['完成', '是否完成', '状态', 'completed', 'status'])),
+      source: 'study-plan-import',
+    })
+  })
+
+  importedStudyTasks.value = tasks
+  importWarnings.value = warnings
+}
+
+function openStudyPlanImport() {
+  importFileName.value = ''
+  importedStudyTasks.value = []
+  importWarnings.value = []
+  if (importFileInput.value) importFileInput.value.value = ''
+  importModalOpen.value = true
+}
+
+async function handleStudyPlanFile(event: Event) {
+  const input = event.target as HTMLInputElement
+  const file = input.files?.[0]
+  if (!file) return
+  importFileName.value = file.name
+  importWarnings.value = []
+  importedStudyTasks.value = []
+
+  try {
+    let rows: Record<string, unknown>[] = []
+    const lowerName = file.name.toLowerCase()
+    if (lowerName.endsWith('.json')) {
+      const parsed = JSON.parse(await file.text())
+      rows = Array.isArray(parsed) ? parsed : Array.isArray(parsed?.tasks) ? parsed.tasks : []
+    } else if (lowerName.endsWith('.csv')) {
+      rows = parseCsvText(await file.text())
+    } else {
+      const XLSX = await import('xlsx')
+      const workbook = XLSX.read(await file.arrayBuffer(), { type: 'array', cellDates: true })
+      const firstSheet = workbook.Sheets[workbook.SheetNames[0]]
+      rows = XLSX.utils.sheet_to_json<Record<string, unknown>>(firstSheet, { defval: '', raw: true })
+    }
+    if (!rows.length) throw new Error('文件中没有可读取的任务行')
+    rowsToStudyTasks(rows)
+    if (!importedStudyTasks.value.length) throw new Error('没有识别到有效任务，请检查日期和任务名称列')
+  } catch (err) {
+    emit('notify', err instanceof Error ? err.message : '学习计划解析失败', true)
+  }
+}
+
+async function downloadStudyPlanTemplate() {
+  const XLSX = await import('xlsx')
+  const rows = [
+    {
+      日期: formatIsoDate(today),
+      学习任务: '复习高等数学极限章节',
+      开始时间: '09:00',
+      结束时间: '10:00',
+      分类: '高等数学',
+      优先级: '高',
+      预计分钟: 60,
+      备注: '完成例题 1-8',
+      是否完成: '否',
+    },
+    {
+      日期: formatIsoDate(addDays(today, 1)),
+      学习任务: '背诵英语单词 50 个',
+      开始时间: '20:00',
+      结束时间: '20:30',
+      分类: '英语',
+      优先级: '中',
+      预计分钟: 30,
+      备注: '',
+      是否完成: '否',
+    },
+  ]
+  const sheet = XLSX.utils.json_to_sheet(rows)
+  sheet['!cols'] = [{ wch: 12 }, { wch: 30 }, { wch: 12 }, { wch: 12 }, { wch: 16 }, { wch: 10 }, { wch: 12 }, { wch: 28 }, { wch: 12 }]
+  const workbook = XLSX.utils.book_new()
+  XLSX.utils.book_append_sheet(workbook, sheet, '学习计划')
+  XLSX.writeFile(workbook, 'DailyManager学习计划导入模板.xlsx')
+}
+
+async function importStudyPlan() {
+  const ws = activeWorkspace.value
+  if (!ws || !importedStudyTasks.value.length) return
+  importingPlan.value = true
+  try {
+    const existingKeys = new Set(ws.data.events.map((event) => `${event.date}|${event.title}|${event.start}`))
+    const uniqueTasks = importedStudyTasks.value.filter((task) => {
+      const key = `${task.date}|${task.title}|${task.start}`
+      if (existingKeys.has(key)) return false
+      existingKeys.add(key)
+      return true
+    })
+    const duplicateCount = importedStudyTasks.value.length - uniqueTasks.length
+    ws.data.events.push(...uniqueTasks.map(({ rowNumber: _rowNumber, ...task }) => task))
+    await persistActiveWorkspace()
+    if (uniqueTasks.length) {
+      selectedDay.value = uniqueTasks[0].date
+      currentYear.value = Number(uniqueTasks[0].date.slice(0, 4))
+    }
+    importModalOpen.value = false
+    emit('notify', `已导入 ${uniqueTasks.length} 个每日学习任务${duplicateCount ? `，跳过 ${duplicateCount} 个重复任务` : ''}`)
+  } finally {
+    importingPlan.value = false
+  }
 }
 
 function setSyncQuickWeeks(weeks: number) {
@@ -335,6 +605,21 @@ function sortedEventsOnDate(key: string): CalendarEventItem[] {
   return ws.data.events.filter((e) => e.date === key).sort((a, b) => a.start.localeCompare(b.start))
 }
 
+function completedEventsOnDate(key: string) {
+  return sortedEventsOnDate(key).filter((event) => event.completed).length
+}
+
+function completionPercentOnDate(key: string) {
+  const events = sortedEventsOnDate(key)
+  return events.length ? Math.round((events.filter((event) => event.completed).length / events.length) * 100) : 0
+}
+
+function toggleEventCompleted(event: CalendarEventItem, mouseEvent?: MouseEvent) {
+  mouseEvent?.stopPropagation()
+  event.completed = !event.completed
+  persistActiveWorkspace()
+}
+
 function marksBackground(ms: CalendarMarkItem[]): string {
   if (!ms.length) return ''
   if (ms.length === 1) return hexToRgba(ms[0].color, 0.22)
@@ -494,6 +779,7 @@ function onDateDrop(dateStr: string, e: DragEvent) {
 }
 
 onMounted(() => {
+  selectedDay.value = formatIsoDate(today)
   loadAllData()
 })
 </script>
@@ -564,6 +850,10 @@ onMounted(() => {
             <span>同步课程表</span>
           </button>
           <template v-if="activeView === 'calendar'">
+            <button class="tool-btn import-plan-btn" title="从 Excel、CSV 或 JSON 导入每日学习任务" @click="openStudyPlanImport">
+              <Upload :size="14" />
+              <span>导入学习计划</span>
+            </button>
             <button class="tool-btn" @click="currentYear = today.getFullYear()">回到今年</button>
             <button class="tool-btn icon-btn" @click="currentYear--"><ChevronLeft :size="16" /></button>
             <span class="year-label">{{ currentYear }} 年</span>
@@ -758,10 +1048,17 @@ onMounted(() => {
                         v-for="ev in sortedEventsOnDate(dateKey(currentYear, m - 1, d)).slice(0, 2)"
                         :key="ev.id"
                         class="event-chip"
+                        :class="{ completed: ev.completed }"
                         @click.stop="openEventModal(ev.date, ev)"
                       >
-                        {{ ev.start }} {{ ev.title }}
+                        {{ ev.completed ? '✓' : '' }} {{ ev.start }} {{ ev.title }}
                       </span>
+                      <small
+                        v-if="sortedEventsOnDate(dateKey(currentYear, m - 1, d)).length > 2"
+                        class="more-events"
+                      >
+                        +{{ sortedEventsOnDate(dateKey(currentYear, m - 1, d)).length - 2 }}
+                      </small>
                     </div>
                   </div>
                 </div>
@@ -806,19 +1103,49 @@ onMounted(() => {
             <!-- 当天日程详情 -->
             <div class="side-card">
               <div class="card-head-sm">
-                <h4>当天时间安排</h4>
+                <div>
+                  <h4>当天学习任务</h4>
+                  <small v-if="selectedDay && sortedEventsOnDate(selectedDay).length" class="day-progress-text">
+                    已完成 {{ completedEventsOnDate(selectedDay) }}/{{ sortedEventsOnDate(selectedDay).length }}
+                  </small>
+                </div>
                 <span class="tag-badge">{{ selectedDay ? dateText(selectedDay) : '未选择' }}</span>
               </div>
               <div v-if="selectedDay" class="day-schedule">
+                <div v-if="sortedEventsOnDate(selectedDay).length" class="day-progress-track">
+                  <span :style="{ width: completionPercentOnDate(selectedDay) + '%' }"></span>
+                </div>
                 <div
                   v-for="ev in sortedEventsOnDate(selectedDay)"
                   :key="ev.id"
                   class="event-row"
+                  :class="[`priority-${ev.priority || 'medium'}`, { completed: ev.completed }]"
                   @click="openEventModal(selectedDay, ev)"
                 >
-                  <div class="event-time">{{ ev.start }}{{ ev.end ? '–' + ev.end : '' }}</div>
-                  <div class="event-title">{{ ev.title }}</div>
+                  <button
+                    class="event-check"
+                    :class="{ checked: ev.completed }"
+                    :title="ev.completed ? '标记为未完成' : '标记为已完成'"
+                    @click="toggleEventCompleted(ev, $event)"
+                  >
+                    <CheckCircle2 v-if="ev.completed" :size="16" />
+                    <span v-else></span>
+                  </button>
+                  <div class="event-content">
+                    <div class="event-time">
+                      {{ ev.start }}{{ ev.end ? '–' + ev.end : '' }}
+                      <span v-if="ev.estimated_minutes">· {{ ev.estimated_minutes }} 分钟</span>
+                    </div>
+                    <div class="event-title">{{ ev.title }}</div>
+                    <div v-if="ev.category || ev.note" class="event-meta">
+                      <span v-if="ev.category" class="category-pill">{{ ev.category }}</span>
+                      <span v-if="ev.note" class="event-note">{{ ev.note }}</span>
+                    </div>
+                  </div>
                 </div>
+                <p v-if="!sortedEventsOnDate(selectedDay).length" class="panel-hint empty-day-hint">
+                  这一天还没有学习任务，可以单独添加或批量导入计划。
+                </p>
                 <button
                   class="outline-action"
                   style="width: 100%; margin-top: 8px"
@@ -987,6 +1314,95 @@ onMounted(() => {
           <button v-if="editingEventId" class="danger-btn" @click="deleteEventModal">删除日程</button>
           <button class="secondary-btn" @click="eventModalOpen = false">取消</button>
           <button class="primary-btn" @click="saveEventModal">保存</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- 学习计划批量导入弹窗 -->
+    <div v-if="importModalOpen" class="modal-backdrop">
+      <div class="cal-modal study-import-modal">
+        <div class="modal-head-row">
+          <div class="modal-title-box">
+            <FileSpreadsheet :size="21" class="text-accent" />
+            <div>
+              <h3>一键导入学习计划</h3>
+              <p class="modal-sub">把计划按日期拆成每天的小任务，完成状态会保存在当前日历。</p>
+            </div>
+          </div>
+          <button class="close-btn" @click="importModalOpen = false"><X :size="16" /></button>
+        </div>
+
+        <div class="import-guide">
+          <strong>支持 Excel、CSV、JSON</strong>
+          <span>至少需要“日期”和“学习任务”两列；时间、分类、优先级、时长和备注可选。</span>
+          <button class="template-btn" type="button" @click="downloadStudyPlanTemplate">
+            <Download :size="14" /> 下载填写模板
+          </button>
+        </div>
+
+        <label class="file-drop-zone">
+          <Upload :size="24" />
+          <strong>{{ importFileName || '选择学习计划文件' }}</strong>
+          <span>{{ importFileName ? '可以重新选择其他文件' : '点击选择 .xlsx / .xls / .csv / .json' }}</span>
+          <input
+            ref="importFileInput"
+            type="file"
+            accept=".xlsx,.xls,.csv,.json"
+            @change="handleStudyPlanFile"
+          />
+        </label>
+
+        <div v-if="importedStudyTasks.length" class="import-summary">
+          <div class="summary-stat">
+            <strong>{{ importedStudyTasks.length }}</strong>
+            <span>个有效任务</span>
+          </div>
+          <div class="summary-stat">
+            <strong>{{ new Set(importedStudyTasks.map((task) => task.date)).size }}</strong>
+            <span>个学习日</span>
+          </div>
+          <div class="summary-stat">
+            <strong>{{ importedStudyTasks.filter((task) => task.priority === 'high').length }}</strong>
+            <span>个高优先级</span>
+          </div>
+        </div>
+
+        <div v-if="importedStudyTasks.length" class="import-preview">
+          <div
+            v-for="task in importedStudyTasks.slice(0, 8)"
+            :key="task.id"
+            class="preview-task"
+          >
+            <span class="preview-date">{{ task.date }}</span>
+            <div>
+              <strong>{{ task.title }}</strong>
+              <small>{{ task.start }}{{ task.end ? `–${task.end}` : '' }}{{ task.category ? ` · ${task.category}` : '' }}</small>
+            </div>
+            <span class="priority-pill" :class="`priority-${task.priority}`">
+              {{ task.priority === 'high' ? '高' : task.priority === 'low' ? '低' : '中' }}
+            </span>
+          </div>
+          <p v-if="importedStudyTasks.length > 8" class="preview-more">
+            还有 {{ importedStudyTasks.length - 8 }} 个任务将在确认后导入
+          </p>
+        </div>
+
+        <div v-if="importWarnings.length" class="import-warnings">
+          <strong>{{ importWarnings.length }} 条提示</strong>
+          <span>{{ importWarnings.slice(0, 3).join('；') }}</span>
+        </div>
+
+        <div class="modal-actions">
+          <button class="secondary-btn" @click="importModalOpen = false">取消</button>
+          <button
+            class="primary-btn import-confirm-btn"
+            :disabled="!importedStudyTasks.length || importingPlan"
+            @click="importStudyPlan"
+          >
+            <RefreshCw v-if="importingPlan" class="spin-icon" :size="14" />
+            <Upload v-else :size="14" />
+            {{ importingPlan ? '正在导入…' : `导入 ${importedStudyTasks.length || ''} 个任务` }}
+          </button>
         </div>
       </div>
     </div>
@@ -1632,6 +2048,19 @@ onMounted(() => {
   color: #334155;
 }
 
+.event-chip.completed {
+  color: #64748b;
+  text-decoration: line-through;
+  opacity: 0.72;
+}
+
+.more-events {
+  font-size: 8px;
+  color: var(--accent);
+  font-weight: 700;
+  padding-left: 2px;
+}
+
 /* 右侧栏 */
 .cal-right-pane {
   background: #ffffff;
@@ -1720,7 +2149,33 @@ textarea {
   gap: 6px;
 }
 
+.day-progress-text {
+  display: block;
+  color: #64748b;
+  font-size: 9px;
+  margin-top: 2px;
+}
+
+.day-progress-track {
+  height: 5px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: #e2e8f0;
+  margin-bottom: 2px;
+}
+
+.day-progress-track span {
+  display: block;
+  height: 100%;
+  background: linear-gradient(90deg, var(--accent), #34d399);
+  border-radius: inherit;
+  transition: width 0.2s ease;
+}
+
 .event-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
   background: white;
   border: 1px solid #e2e8f0;
   border-left: 3px solid var(--accent);
@@ -1730,10 +2185,91 @@ textarea {
   cursor: pointer;
 }
 
+.event-row.priority-high {
+  border-left-color: #ef4444;
+}
+
+.event-row.priority-low {
+  border-left-color: #94a3b8;
+}
+
+.event-row.completed {
+  background: #f8fafc;
+  opacity: 0.75;
+}
+
+.event-row.completed .event-title {
+  color: #64748b;
+  text-decoration: line-through;
+}
+
+.event-check {
+  width: 20px;
+  height: 20px;
+  flex: 0 0 20px;
+  display: grid;
+  place-items: center;
+  border: 0;
+  background: transparent;
+  color: #10b981;
+  padding: 1px;
+  cursor: pointer;
+}
+
+.event-check > span {
+  width: 14px;
+  height: 14px;
+  border: 1.5px solid #cbd5e1;
+  border-radius: 50%;
+}
+
+.event-content {
+  min-width: 0;
+  flex: 1;
+}
+
 .event-time {
   font-size: 10px;
   color: #64748b;
   font-weight: 600;
+}
+
+.event-title {
+  margin-top: 2px;
+  font-weight: 650;
+  color: #1e293b;
+  line-height: 1.35;
+}
+
+.event-meta {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  margin-top: 4px;
+  min-width: 0;
+}
+
+.category-pill {
+  flex: 0 0 auto;
+  padding: 1px 5px;
+  border-radius: 999px;
+  background: #eef2ff;
+  color: #4f46e5;
+  font-size: 9px;
+}
+
+.event-note {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: #64748b;
+  font-size: 9px;
+}
+
+.empty-day-hint {
+  padding: 10px 4px 2px;
+  text-align: center;
 }
 
 .tasks-mini-list {
@@ -1846,6 +2382,19 @@ textarea {
   gap: 5px;
 }
 
+.import-plan-btn {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  color: #0f766e;
+  border-color: #99f6e4;
+  background: #f0fdfa;
+}
+
+.import-plan-btn:hover {
+  background: #ccfbf1;
+}
+
 .sync-btn:hover {
   background: var(--accent, #627cf7);
   color: white;
@@ -1853,6 +2402,209 @@ textarea {
 
 .sync-courses-modal {
   max-width: 520px;
+}
+
+.study-import-modal {
+  max-width: 620px;
+  max-height: calc(100vh - 40px);
+  overflow-y: auto;
+}
+
+.import-guide {
+  position: relative;
+  display: grid;
+  gap: 3px;
+  padding: 11px 150px 11px 12px;
+  border-radius: 8px;
+  background: #f0fdfa;
+  border: 1px solid #ccfbf1;
+  color: #134e4a;
+  margin-bottom: 12px;
+}
+
+.import-guide strong {
+  font-size: 12px;
+}
+
+.import-guide span {
+  font-size: 10px;
+  line-height: 1.45;
+}
+
+.template-btn {
+  position: absolute;
+  right: 10px;
+  top: 50%;
+  transform: translateY(-50%);
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  border: 1px solid #5eead4;
+  background: white;
+  color: #0f766e;
+  border-radius: 6px;
+  padding: 6px 9px;
+  font-size: 10px;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.file-drop-zone {
+  display: grid;
+  place-items: center;
+  gap: 5px;
+  min-height: 120px;
+  border: 1.5px dashed #94a3b8;
+  border-radius: 10px;
+  background: #f8fafc;
+  color: #475569;
+  cursor: pointer;
+  transition: border-color 0.15s ease, background 0.15s ease;
+}
+
+.file-drop-zone:hover {
+  border-color: var(--accent);
+  background: #f5f7ff;
+}
+
+.file-drop-zone strong {
+  color: #1e293b;
+  font-size: 12px;
+}
+
+.file-drop-zone span {
+  font-size: 10px;
+}
+
+.file-drop-zone input {
+  display: none;
+}
+
+.import-summary {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.summary-stat {
+  display: flex;
+  align-items: baseline;
+  gap: 5px;
+  background: #f8fafc;
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+  padding: 8px 10px;
+}
+
+.summary-stat strong {
+  font-size: 18px;
+  color: var(--accent);
+}
+
+.summary-stat span {
+  font-size: 10px;
+  color: #64748b;
+}
+
+.import-preview {
+  max-height: 220px;
+  overflow-y: auto;
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+  margin-top: 10px;
+}
+
+.preview-task {
+  display: grid;
+  grid-template-columns: 82px 1fr auto;
+  gap: 9px;
+  align-items: center;
+  padding: 8px 10px;
+  border-bottom: 1px solid #eef2f7;
+}
+
+.preview-task:last-child {
+  border-bottom: 0;
+}
+
+.preview-date {
+  color: #475569;
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+}
+
+.preview-task div {
+  min-width: 0;
+}
+
+.preview-task strong,
+.preview-task small {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.preview-task strong {
+  font-size: 11px;
+  color: #1e293b;
+}
+
+.preview-task small {
+  font-size: 9px;
+  color: #64748b;
+  margin-top: 2px;
+}
+
+.priority-pill {
+  padding: 2px 6px;
+  border-radius: 999px;
+  background: #fef3c7;
+  color: #92400e;
+  font-size: 9px;
+  font-weight: 700;
+}
+
+.priority-pill.priority-high {
+  background: #fee2e2;
+  color: #b91c1c;
+}
+
+.priority-pill.priority-low {
+  background: #e2e8f0;
+  color: #475569;
+}
+
+.preview-more {
+  margin: 0;
+  padding: 7px 10px;
+  text-align: center;
+  color: #64748b;
+  background: #f8fafc;
+  font-size: 10px;
+}
+
+.import-warnings {
+  display: grid;
+  gap: 2px;
+  padding: 8px 10px;
+  margin-top: 10px;
+  border-radius: 7px;
+  background: #fff7ed;
+  color: #9a3412;
+  font-size: 10px;
+}
+
+.import-confirm-btn {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.import-confirm-btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
 }
 
 .modal-head-row {

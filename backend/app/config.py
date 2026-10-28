@@ -1,10 +1,14 @@
 from __future__ import annotations
 
 import os
+import sys
 from pathlib import Path
 
 BACKEND_DIR = Path(__file__).resolve().parents[1]
 PROJECT_DIR = BACKEND_DIR.parent
+IS_FROZEN = bool(getattr(sys, "frozen", False))
+RUNTIME_DIR = Path(sys.executable).resolve().parent if IS_FROZEN else PROJECT_DIR
+BUNDLE_DIR = Path(getattr(sys, "_MEIPASS", PROJECT_DIR))
 
 # 自动加载 .env 配置文件（优先 backend/.env，其次项目根目录 .env）
 try:
@@ -30,7 +34,12 @@ if os.getenv("AI_MODEL") and not os.getenv("VISION_MODEL"):
     os.environ["VISION_MODEL"] = os.environ["AI_MODEL"]
 
 def get_data_dir() -> Path:
-    return Path(os.getenv("DAILY_MANAGER_DATA_DIR", PROJECT_DIR / "data")).resolve()
+    return Path(os.getenv("DAILY_MANAGER_DATA_DIR", RUNTIME_DIR / "data")).resolve()
+
+
+def get_frontend_dist_dir() -> Path:
+    """Return the Vite build directory in development or a PyInstaller bundle."""
+    return (BUNDLE_DIR / "frontend" / "dist").resolve()
 
 
 def get_library_dir() -> Path:

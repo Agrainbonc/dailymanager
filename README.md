@@ -10,6 +10,8 @@
 
 选择课程后可以导出源文件 ZIP，或导出可供其他 AI 使用的文本 ZIP。文本包包括每份资料的 Markdown、分类和处理状态；尚未完成 ASR/视觉识别的资料会明确说明缺少文本。
 
+日历模块支持从 Excel、CSV 或 JSON 一键导入学习计划。计划会按日期拆分成每天的小任务卡片，可勾选完成、查看当天进度，并自动跳过重复记录。界面内提供可直接填写的 Excel 模板。
+
 ## 目录
 
 - `backend/`：FastAPI 本地服务、SQLite 数据和文件处理任务。
@@ -24,3 +26,7 @@
 3. 在 `frontend/` 安装依赖后运行 `npm run dev`。
 
 前端开发服务器会将 `/api` 请求转发到本地 Python 服务。发布版将由 Tauri 启动 Python Sidecar，而不是暴露公网服务。
+
+## Windows 打包
+
+在 PowerShell 中运行 `tools/build_windows.ps1`，脚本会构建前端、创建隔离的 Python 打包环境，并在 `release/` 生成 `DailyManager-Windows-x64.zip`。最终用户解压后双击 `DailyManager.exe` 即可使用，详见 `README_WINDOWS.md`。
